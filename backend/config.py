@@ -7,3 +7,4 @@ OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 LLM_MODEL = os.getenv("LLM_MODEL")
 DATABASE_URL = os.getenv("DATABASE_URL")
+USE_FAKE_LLM = os.getenv("USE_FAKE_LLM", "False").lower() == "true"

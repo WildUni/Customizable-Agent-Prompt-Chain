@@ -1,7 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from llm import run_prompt
 
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173"],
