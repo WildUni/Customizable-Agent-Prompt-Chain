@@ -8,6 +8,7 @@ engine = create_engine(
 )
 
 def init_db():
+    import models  # noqa: F401  (registers table models with SQLModel.metadata)
     SQLModel.metadata.create_all(engine)   # creates tables from your models
 
 def get_session():
