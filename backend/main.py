@@ -9,10 +9,6 @@ app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173"],
 class PromptIn(BaseModel):
     prompt: str
 
-@app.post("/run")
-def run(body: PromptIn):
-    return {"output": run_prompt(body.prompt)}
-
 @app.get("/health")
 def get_health():
     return {"status": "ok"}

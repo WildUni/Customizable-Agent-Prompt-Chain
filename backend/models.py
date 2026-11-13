@@ -3,29 +3,62 @@
 See SPEC.md section 4.
 """
 from collections import deque
-from datetime import datetime, timezone
-from typing import Any, Literal
+from datetime import UTC, datetime
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field as PydanticField, model_validator
-from sqlalchemy import Column, JSON
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    FiniteFloat,
+    StringConstraints,
+    model_validator,
+)
+from pydantic import (
+    Field as PydanticField,
+)
+from sqlalchemy import JSON, Column
 from sqlmodel import Field, SQLModel
 
 from llm import LLMSettings
 
+NAME_MAX_LENGTH = 200
+
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
+
+
+def _no_surrounding_whitespace(value: str) -> str:
+    if value != value.strip():
+        raise ValueError("must not have leading or trailing whitespace")
+    return value
+
+
+# Graph element id: non-empty, no leading/trailing whitespace (rejected, not trimmed,
+# so the id the client holds is always the id we store).
+GraphId = Annotated[str, StringConstraints(min_length=1), AfterValidator(_no_surrounding_whitespace)]
+
+# Chain name: trimmed, then must be non-empty and at most NAME_MAX_LENGTH chars.
+ChainName = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=NAME_MAX_LENGTH)
+]
+
+
+class _Strict(BaseModel):
+    """Base for client-facing models: unknown fields are errors, not silently dropped."""
+    model_config = ConfigDict(extra="forbid")
 
 
 # ---------- graph pieces ----------
 
-class Position(BaseModel):
-    x: float = 0
-    y: float = 0
+class Position(_Strict):
+    x: FiniteFloat = 0
+    y: FiniteFloat = 0
 
 
-class Node(BaseModel):
-    id: str = PydanticField(min_length=1)
+class Node(_Strict):
+    id: GraphId
     type: Literal["prompt"] = "prompt"
     label: str = ""
     prompt_template: str = ""
@@ -33,15 +66,15 @@ class Node(BaseModel):
     position: Position = PydanticField(default_factory=Position)
 
 
-class Edge(BaseModel):
-    id: str = PydanticField(min_length=1)
+class Edge(_Strict):
+    id: GraphId
     source: str
     target: str
     condition: str | None = None
     label: str = ""
 
 
-class ChainGraph(BaseModel):
+class ChainGraph(_Strict):
     nodes: list[Node] = PydanticField(default_factory=list)
     edges: list[Edge] = PydanticField(default_factory=list)
 
@@ -132,8 +165,10 @@ class ChainGraph(BaseModel):
 # ---------- database table ----------
 
 class Chain(SQLModel, table=True):
+    # Note: SQLModel table models skip validation on construction. Input is
+    # validated by ChainCreate before it reaches this table.
     id: int | None = Field(default=None, primary_key=True)
-    name: str
+    name: str = Field(max_length=NAME_MAX_LENGTH)
     graph: dict[str, Any] = Field(
         default_factory=lambda: ChainGraph().model_dump(mode="json"),
         sa_column=Column(JSON, nullable=False),
@@ -151,8 +186,8 @@ class Chain(SQLModel, table=True):
 
 # ---------- API schemas ----------
 
-class ChainCreate(BaseModel):
-    name: str
+class ChainCreate(_Strict):
+    name: ChainName
     graph: ChainGraph = PydanticField(default_factory=ChainGraph)
 
 

@@ -1,9 +1,12 @@
+import math
 from types import SimpleNamespace
+
+import pytest
+from pydantic import ValidationError
 
 import config
 import llm
 from llm import LLMSettings, complete, fake_complete
-
 
 # ---------- helpers ----------
 
@@ -24,6 +27,36 @@ def use_fake_client(monkeypatch, reply="hello"):
     fake = FakeClient(reply)
     monkeypatch.setattr(llm, "client", fake)
     return fake
+
+
+@pytest.fixture(autouse=True)
+def isolate_from_env(monkeypatch):
+    """Don't let a developer's .env change test results: real-LLM path, no
+    cached client."""
+    monkeypatch.setattr(config, "USE_FAKE_LLM", False)
+    monkeypatch.setattr(llm, "client", None)
+
+
+# ---------- get_client ----------
+
+def test_get_client_without_api_key_raises_clear_error(monkeypatch):
+    monkeypatch.setattr(config, "OPENAI_API_KEY", None)
+    with pytest.raises(RuntimeError, match="OPENAI_API_KEY is not set"):
+        complete("hi")
+
+
+def test_get_client_created_once_and_cached(monkeypatch):
+    monkeypatch.setattr(config, "OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr(config, "OPENAI_BASE_URL", "http://localhost:1/v1")
+    first = llm.get_client()
+    assert llm.get_client() is first
+    assert first.api_key == "test-key"
+
+
+def test_fake_mode_needs_no_api_key(monkeypatch):
+    monkeypatch.setattr(config, "OPENAI_API_KEY", None)
+    monkeypatch.setattr(config, "USE_FAKE_LLM", True)
+    assert complete("hi") == fake_complete("hi")
 
 
 # ---------- fake_complete ----------
@@ -77,3 +110,31 @@ def test_complete_passes_settings(monkeypatch):
 def test_complete_handles_none_content(monkeypatch):
     use_fake_client(monkeypatch, reply=None)
     assert complete("hi") == ""
+
+# ---------- LLMSettings validation ----------
+
+
+@pytest.mark.parametrize("temperature", [0, 0.7, 2])
+def test_temperature_in_range_accepted(temperature):
+    assert LLMSettings(temperature=temperature).temperature == temperature
+
+
+@pytest.mark.parametrize("temperature", [-0.1, 2.1, math.nan])
+def test_temperature_out_of_range_rejected(temperature):
+    with pytest.raises(ValidationError):
+        LLMSettings(temperature=temperature)
+
+
+def test_max_tokens_positive_accepted():
+    assert LLMSettings(max_tokens=1).max_tokens == 1
+
+
+@pytest.mark.parametrize("max_tokens", [0, -5])
+def test_max_tokens_non_positive_rejected(max_tokens):
+    with pytest.raises(ValidationError):
+        LLMSettings(max_tokens=max_tokens)
+
+
+def test_settings_unknown_field_rejected():
+    with pytest.raises(ValidationError, match="temp"):
+        LLMSettings(temp=0.5)

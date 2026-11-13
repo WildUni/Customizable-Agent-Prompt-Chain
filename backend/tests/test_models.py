@@ -1,9 +1,19 @@
+import math
+
 import pytest
 from pydantic import ValidationError
 from sqlmodel import Session, SQLModel, create_engine
 
-from models import Chain, ChainCreate, ChainGraph, ChainRead, Edge, Node
-
+from models import (
+    NAME_MAX_LENGTH,
+    Chain,
+    ChainCreate,
+    ChainGraph,
+    ChainRead,
+    Edge,
+    Node,
+    Position,
+)
 
 # ---------- helpers ----------
 
@@ -168,3 +178,70 @@ def test_chain_read_from_table(diamond):
         created_at=chain.created_at, updated_at=chain.updated_at,
     )
     assert read.graph.topological_order() == ["a", "b", "c", "d"]
+
+
+# ---------- field validation ----------
+
+
+@pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf])
+@pytest.mark.parametrize("axis", ["x", "y"])
+def test_position_must_be_finite(axis, value):
+    with pytest.raises(ValidationError):
+        Position(**{axis: value})
+
+
+def test_position_accepts_negative_and_fractional():
+    p = Position(x=-12.5, y=3.25)
+    assert (p.x, p.y) == (-12.5, 3.25)
+
+
+@pytest.mark.parametrize("bad_id", [" a", "a ", "\ta", " "])
+def test_node_id_surrounding_whitespace_rejected(bad_id):
+    with pytest.raises(ValidationError):
+        Node(id=bad_id)
+
+
+@pytest.mark.parametrize("bad_id", [" e", "e ", " "])
+def test_edge_id_surrounding_whitespace_rejected(bad_id):
+    with pytest.raises(ValidationError):
+        Edge(id=bad_id, source="a", target="b")
+
+
+def test_ids_with_inner_whitespace_allowed():
+    assert Node(id="node 1").id == "node 1"
+
+
+def test_chain_name_is_trimmed():
+    assert ChainCreate(name="  My chain  ").name == "My chain"
+
+
+@pytest.mark.parametrize("name", ["", "   ", "x" * (NAME_MAX_LENGTH + 1)])
+def test_chain_name_invalid_rejected(name):
+    with pytest.raises(ValidationError):
+        ChainCreate(name=name)
+
+
+def test_chain_name_at_max_length_accepted():
+    assert len(ChainCreate(name="x" * NAME_MAX_LENGTH).name) == NAME_MAX_LENGTH
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda: Position(x=1, z=2),
+        lambda: Node(id="a", selected=True),
+        lambda: Node(id="a", settings={"temp": 0.5}),
+        lambda: Edge(id="e", sourceId="a", source="a", target="b"),
+        lambda: ChainGraph(nodes=[], edges=[], viewport={}),
+        lambda: ChainCreate(name="c", owner="me"),
+    ],
+    ids=["position", "node", "node.settings", "edge", "graph", "chain_create"],
+)
+def test_unknown_fields_rejected(build):
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        build()
+
+
+def test_invalid_node_settings_rejected_inside_graph():
+    with pytest.raises(ValidationError):
+        ChainGraph(nodes=[{"id": "a", "settings": {"temperature": 5}}])

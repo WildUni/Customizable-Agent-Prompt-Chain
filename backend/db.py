@@ -1,11 +1,14 @@
-from sqlmodel import SQLModel, create_engine, Session
+from sqlmodel import Session, SQLModel, create_engine
 
-DATABASE_URL = "sqlite:///./app.db"   # later: read this from .env
+import config
 
-engine = create_engine(
-    DATABASE_URL,
-    connect_args={"check_same_thread": False},  # SQLite-only setting FastAPI needs
+# SQLite needs check_same_thread=False because FastAPI serves requests on
+# multiple threads; other databases don't accept this argument.
+_connect_args = (
+    {"check_same_thread": False} if config.DATABASE_URL.startswith("sqlite") else {}
 )
+
+engine = create_engine(config.DATABASE_URL, connect_args=_connect_args)
 
 def init_db():
     import models  # noqa: F401  (registers table models with SQLModel.metadata)

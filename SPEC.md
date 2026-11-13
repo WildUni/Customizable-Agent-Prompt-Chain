@@ -24,29 +24,37 @@ Sections marked **(planned)** are not implemented yet.
 
 ### 2.1 Configuration — `backend/config.py`
 
-Loads `.env` with `python-dotenv` and exposes module-level constants:
+Loads `backend/.env` with `python-dotenv` (if the file exists) and exposes module-level constants. Every constant can be overridden by an environment variable of the same name. Real environment variables take precedence over `.env`.
 
-| Constant          | Env var           | Default | Purpose |
-|-------------------|-------------------|---------|---------|
-| `OPENAI_BASE_URL` | `OPENAI_BASE_URL` | `None`  | Base URL of any OpenAI-compatible API (OpenAI, Ollama, …) |
-| `OPENAI_API_KEY`  | `OPENAI_API_KEY`  | `None`  | API key |
-| `LLM_MODEL`       | `LLM_MODEL`       | `None`  | Default model name |
-| `DATABASE_URL`    | `DATABASE_URL`    | `None`  | Database URL (not used yet; see 2.3) |
-| `USE_FAKE_LLM`    | `USE_FAKE_LLM`    | `False` | `"true"` (case-insensitive) swaps in the fake LLM |
+| Constant          | Default              | Where it's set | Purpose |
+|-------------------|----------------------|----------------|---------|
+| `LLM_MODEL`       | `"qwen3:8b"`         | `config.py` (not a secret) | Default model name |
+| `USE_FAKE_LLM`    | `False`              | `config.py` (not a secret) | `"true"` (case-insensitive) swaps in the fake LLM |
+| `OPENAI_BASE_URL` | `None` (OpenAI's default URL) | `.env` | Base URL of any OpenAI-compatible API (OpenAI, Ollama, …) |
+| `OPENAI_API_KEY`  | `None`, **no default** | `.env` | API key. It's a secret, so it never has a default. Only needed for real LLM calls. |
+| `DATABASE_URL`    | `"sqlite:///./app.db"` | `.env` | Database URL used by `db.py` |
+
+`backend/.env.example` lists the `.env` keys. Because every value except the API key has a default, and the API key is only read on the first real LLM call (2.2), **the app imports and the test suite runs without a `.env` file**. That's how CI runs.
 
 ### 2.2 LLM client — `backend/llm.py`
 
 **`LLMSettings`** (Pydantic model): per-call generation settings.
 
-| Field         | Type          | Default             |
-|---------------|---------------|---------------------|
-| `model`       | `str`         | `config.LLM_MODEL`  |
-| `temperature` | `float`       | `0.7`               |
-| `max_tokens`  | `int \| None` | `None` (omitted from the request) |
-| `system`      | `str \| None` | `None` (no system message) |
+| Field         | Type          | Default             | Validation |
+|---------------|---------------|---------------------|------------|
+| `model`       | `str`         | `config.LLM_MODEL`  | Not checked against a model list, because any OpenAI-compatible server may be used |
+| `temperature` | `float`       | `0.7`               | `0 ≤ temperature ≤ 2` |
+| `max_tokens`  | `int \| None` | `None` (omitted from the request) | `> 0` when set |
+| `system`      | `str \| None` | `None` (no system message) | — |
+
+Unknown fields are rejected (`extra="forbid"`), so a typo like `temp` is an error instead of being silently dropped. Values are checked when settings are created, for example when a chain is saved, so an invalid value fails then rather than when the API is called.
+
+**`get_client() -> OpenAI`**: creates the OpenAI client the first time it's called, then caches it in the module-level `client`.
+- If `config.OPENAI_API_KEY` is unset, it raises `RuntimeError` with a message pointing to `.env.example` / `USE_FAKE_LLM`.
+- The client is never created at import time, so importing `llm` (directly, or through `models`) never needs a key.
 
 **`complete(prompt: str, settings: LLMSettings | None = None) -> str`**
-- If `config.USE_FAKE_LLM` is true, it returns `fake_complete(prompt, settings)` and never calls the API.
+- If `config.USE_FAKE_LLM` is true, it returns `fake_complete(prompt, settings)` and never calls the API or needs a key.
 - Otherwise it sends one chat completion: an optional system message, then the prompt as a user message.
 - `max_tokens` is sent only when it isn't `None`.
 - It returns the first choice's content, or `""` if the content is `None`.
@@ -54,11 +62,11 @@ Loads `.env` with `python-dotenv` and exposes module-level constants:
 **`fake_complete(prompt, settings=None) -> str`**: returns
 `"Fake response to prompt: {prompt}"`. It's deterministic, for tests and offline development.
 
-Tests: `backend/tests/test_llm.py` (the OpenAI client is monkeypatched).
+Tests: `backend/tests/test_llm.py`. The OpenAI client is monkeypatched, and an autouse fixture forces `USE_FAKE_LLM=False` and clears the cached client, so a developer's `.env` can't change the results.
 
 ### 2.3 Database — `backend/db.py`
 
-- `engine`: SQLite engine at `sqlite:///./app.db`, created with `check_same_thread=False`.
+- `engine`: created from `config.DATABASE_URL`. `check_same_thread=False` is passed only for SQLite URLs, because other databases reject it.
 - `init_db()`: imports the table models and runs `SQLModel.metadata.create_all(engine)`.
 - `get_session()`: a FastAPI dependency that yields a `Session`.
 
@@ -70,15 +78,13 @@ CORS allows `http://localhost:5173` (the Vite dev server).
 |--------|-----------|----------------------|----------|
 | GET    | `/`       | —                    | `{"message": "Hello World"}` |
 | GET    | `/health` | —                    | `{"status": "ok"}` |
-| POST   | `/run`    | `{"prompt": string}` | `{"output": string}` (see known issues) |
+
+Tests: `backend/tests/test_main.py`.
 
 ### 2.5 Known issues
 
-1. `POST /run` calls `run_prompt`, which is never defined, so the endpoint raises `NameError`. It should call `llm.complete`.
-2. `.env.example` uses `OPENAI_MODEL`, but `config.py` reads `LLM_MODEL`. It also doesn't list `OPENAI_BASE_URL` or `USE_FAKE_LLM`.
-3. `db.py` hard-codes the database URL instead of reading `config.DATABASE_URL`.
-4. `tests/test_main.py` is commented out.
-5. The `ollama` dependency is unused, because Ollama is reached through the OpenAI-compatible client.
+1. The `ollama` dependency is unused, because Ollama is reached through the OpenAI-compatible client.
+2. `main.py` still defines `PromptIn`, which no endpoint uses now that `/run` is gone.
 
 ---
 
@@ -104,29 +110,37 @@ The shape (lists of `nodes` with `id` + `position`, and `edges` with `source` / 
 
 Code: `backend/models.py`. Tests: `backend/tests/test_models.py`.
 
+**Field validation conventions** (apply to every model in this section unless noted):
+
+- **Unknown fields are rejected** (`extra="forbid"`) on `Position`, `Node`, `Edge`, `ChainGraph`, `ChainCreate`, and the nested `LLMSettings`. The frontend must convert its editor objects (which carry UI fields like `selected`, `measured`, `dragging`) into these shapes before sending them; raw editor objects are rejected.
+- **Graph ids** (`Node.id`, `Edge.id`) must be non-empty and must not start or end with whitespace. They are *rejected*, not trimmed, so the id the client holds is always the id that's stored. Whitespace inside an id (`"node 1"`) is allowed.
+- Every violation raises a Pydantic `ValidationError`.
+
 ### 4.2 `Position`
 
 | Field | Type    | Default | Notes |
 |-------|---------|---------|-------|
-| `x`   | `float` | `0`     | Canvas coordinate; visual only |
-| `y`   | `float` | `0`     | Canvas coordinate; visual only |
+| `x`   | `float` | `0`     | Canvas coordinate; visual only. Must be finite (no `NaN` / `±inf`). |
+| `y`   | `float` | `0`     | Canvas coordinate; visual only. Must be finite (no `NaN` / `±inf`). |
+
+Coordinates must be finite because `NaN` and infinity are not valid JSON and would corrupt the stored `graph` column.
 
 ### 4.3 `Node`
 
 | Field             | Type          | Default            | Notes |
 |-------------------|---------------|--------------------|-------|
-| `id`              | `str`         | required           | Unique within the chain. Non-empty. Client-generated (e.g. a UUID) so the editor can create nodes offline. |
+| `id`              | `str`         | required           | Unique within the chain. Graph-id rules (see 4.1). Client-generated (e.g. a UUID) so the editor can create nodes offline. |
 | `type`            | `"prompt"`    | `"prompt"`         | Node kind. Will grow (`"input"`, `"output"`, `"condition"`, …). |
 | `label`           | `str`         | `""`               | Display name |
 | `prompt_template` | `str`         | `""`               | Prompt text. Placeholder syntax for upstream outputs is defined by the executor (planned), e.g. `{{input}}`. |
-| `settings`        | `LLMSettings` | `LLMSettings()`    | Reuses `llm.LLMSettings` |
+| `settings`        | `LLMSettings` | `LLMSettings()`    | Reuses `llm.LLMSettings`, including its validation (2.2) |
 | `position`        | `Position`    | `Position()`       | Visual only; ignored by execution |
 
 ### 4.4 `Edge`
 
 | Field       | Type          | Default  | Notes |
 |-------------|---------------|----------|-------|
-| `id`        | `str`         | required | Unique within the chain. Non-empty. |
+| `id`        | `str`         | required | Unique within the chain. Graph-id rules (see 4.1). |
 | `source`    | `str`         | required | `id` of the node the edge leaves |
 | `target`    | `str`         | required | `id` of the node the edge enters |
 | `condition` | `str \| None` | `None`   | `None` = always taken. Reserved for branching; the condition syntax will be defined with the executor. |
@@ -168,7 +182,7 @@ An empty graph is valid. Disconnected nodes are valid (the editor needs them whi
 | Column       | Type              | Notes |
 |--------------|-------------------|-------|
 | `id`         | `int`             | Primary key, auto-increment |
-| `name`       | `str`             | Required |
+| `name`       | `str`             | Required, max 200 chars (validated by `ChainCreate`; see 4.7) |
 | `graph`      | JSON              | Serialized `ChainGraph` |
 | `created_at` | `datetime` (UTC)  | Set on creation |
 | `updated_at` | `datetime` (UTC)  | Set on creation and on every `set_graph` |
@@ -185,6 +199,19 @@ The whole graph is stored as **one JSON column**. The editor saves the whole gra
 |---------------|--------|
 | `ChainCreate` | `name: str`, `graph: ChainGraph = ChainGraph()` |
 | `ChainRead`   | `id`, `name`, `graph: ChainGraph`, `created_at`, `updated_at` |
+
+**`ChainCreate.name`**: leading and trailing whitespace is trimmed first; the result must then be 1–200 characters. `"  My chain  "` is stored as `"My chain"`, and `"   "` is rejected.
+
+**Where validation happens:** SQLModel table models (`Chain`) do **not** validate on construction. All client input must pass through `ChainCreate` (and `ChainGraph`) before it reaches the table. `Chain.get_graph()` re-validates on read.
+
+### 4.8 Deferred validation
+
+These are intentionally not validated yet:
+
+- `Node.prompt_template` placeholders, which will be checked once the executor defines the placeholder syntax.
+- `Edge.condition` syntax, which will be checked once branching is implemented.
+- Length limits on `label` / `prompt_template`, which will be handled by request-size limits at the API layer.
+- `LLMSettings.model` against a list of known models, because OpenAI-compatible servers (e.g. Ollama) make any fixed list wrong.
 
 ---
 
